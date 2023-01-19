@@ -27,7 +27,7 @@ class PeakStatistics:
         df = pd.DataFrame([])
         for _, row in self.req_batch_df.iterrows():
             batch_no = row['req_batch_no']
-            ts = row['ts']
+            ts = row['ts'] + timedelta(days=-1)     # ts时刻的数据时间是昨天的因此-1d
             scada_df = self.load_scada_data(batch_no)
             lng_quantity = self.calc_lng_quantity(scada_df, ts)
             gas_user_quantity = self.calc_gas_user_quantity(scada_df, ts)
@@ -50,11 +50,10 @@ class PeakStatistics:
     def calc_gas_user_quantity(self, scada_df, ts):
         gas_df = scada_df[scada_df['gis_id'].isin(self.gas_ids)].copy()
         user_df = scada_df[scada_df['dno'] == 11].copy()
-        yesterday_ts = ts + timedelta(days=-1)
         gas_quantity = np.round(gas_df['flow_m3_h'].sum() / 10000, 2)
         user_quantity = np.round(user_df['flow_m3_h'].sum() / 10000, 2)
         diff_value = np.round((gas_quantity - user_quantity), 2)
-        df = pd.DataFrame([{"ts": yesterday_ts.strftime("%Y-%m-%d"), "总供气(万方)": gas_quantity,
+        df = pd.DataFrame([{"ts": ts.strftime("%Y-%m-%d"), "总供气(万方)": gas_quantity,
                             "总用气(万方)": user_quantity, "差值(万方)": diff_value}])
         return df
 
@@ -62,10 +61,9 @@ class PeakStatistics:
         lng_df = scada_df[scada_df['gis_id'].isin(self.lng_ids)].copy()
         lng_df = lng_df[['gis_id', 'flow_m3_h']]
         quantity_df = (lng_df.groupby('gis_id')['flow_m3_h'].sum()).rename('quantity').reset_index()
-        yesterday_ts = ts + timedelta(days=-1)
         lingang = quantity_df.loc[quantity_df['gis_id'] == '100100022', 'quantity'].values[0]
         tuanjielu = quantity_df.loc[quantity_df['gis_id'] == '10012167', 'quantity'].values[0]
-        df = pd.DataFrame([{'ts': yesterday_ts.strftime("%Y-%m-%d"), '临港LNG_m3': np.round(lingang, 2),
+        df = pd.DataFrame([{'ts': ts.strftime("%Y-%m-%d"), '临港LNG_m3': np.round(lingang, 2),
                             "团结路_m3": np.round(tuanjielu, 2)}])
         return df
 
@@ -78,7 +76,7 @@ class PeakStatistics:
             next_batch_no = self.transform_batch_no_by_ts(next_ts)
             if next_batch_no is None:
                 print('company plan calc over')
-                break
+                continue
             current_batch_no = row['req_batch_no']
             company_plan = self.load_company_plan(current_batch_no)
             real_company_plan = self.load_real_company_plan(next_batch_no)
@@ -86,7 +84,8 @@ class PeakStatistics:
             merge_df = pd.merge(real_company_plan, company_plan, on='company_name')
             merge_df['ratio'] = np.round(
                 (merge_df['plan_value_wm3'] - merge_df['quantity']) / merge_df['quantity'] * 100, 2)
-            merge_df['ts'] = next_ts.strftime("%Y-%m-%d")
+            real_ts = row['ts'] + timedelta(days=1)  # ts时刻的批复量是时间是明天的 因此+1
+            merge_df['ts'] = real_ts.strftime("%Y-%m-%d")
             ratio_df = pd.concat([ratio_df, merge_df], axis=0)
         ratio_df = ratio_df[['ts', 'company_name', 'plan_value_wm3', 'quantity', 'ratio']]
         ratio_df.rename(columns={"ts": "时间", "plan_value_wm3": "计划量", "quantity": "实际用量", "ratio": "误差率"}, inplace=True)
@@ -97,18 +96,19 @@ class PeakStatistics:
         for _, row in self.req_batch_df.iterrows():
             current_batch_no = row['req_batch_no']
             gas_approv = self.load_gas_approval(current_batch_no)
-            next_ts = row['ts'] + timedelta(days=2)
+            next_ts = row['ts'] + timedelta(days=2)  # ts时刻的批复量是时间是明天的 但是明日的数据在后日才采集到  因此+2
             next_batch_no = self.transform_batch_no_by_ts(next_ts)
             if next_batch_no is None:
                 print('gas ratio calc over')
-                break
+                continue
             real_gas = self.load_real_gas_quantity(next_batch_no)
             merge_df = pd.merge(real_gas, gas_approv, on='gis_id', how='inner')
             print(merge_df)
             merge_df = merge_df[['gis_id', 'quantity', 'plan_value_wm3', 'stationName']]
             merge_df['ratio'] = np.round(
                 (merge_df['plan_value_wm3'] - merge_df['quantity']) / merge_df['quantity'] * 100, 2)
-            merge_df['ts'] = next_ts.strftime("%Y-%m-%d")
+            real_ts = row['ts'] + timedelta(days=1)  # ts时刻的批复量是时间是明天的 因此+1
+            merge_df['ts'] = real_ts.strftime("%Y-%m-%d")
             ratio_df = pd.concat([ratio_df, merge_df], axis=0)
 
         ratio_df = ratio_df[['ts', 'gis_id', 'stationName', 'plan_value_wm3', 'quantity', 'ratio']]
