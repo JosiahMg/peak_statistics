@@ -5,6 +5,7 @@
 import os
 from datetime import timedelta
 
+import numpy as np
 import pandas as pd
 
 FOLD_NAME = "peak_20230113"
@@ -15,10 +16,58 @@ class PeakStatistics:
         self.work_dir = os.path.join(fold_name, "data", "qd_high")
         self.req_batch_df = self.load_req_batch_no()
         self.gas_ids = ["79", "100100017", "100100020", "100100024", "100219112"]
+        self.lng_ids = ['100100022', '10012167']
 
     def execute(self):
         self.calc_company_error_ratio()
         self.calc_gas_error_ratio()
+        self.calc_lng_info()
+
+    def calc_lng_info(self):
+        df = pd.DataFrame([])
+        for _, row in self.req_batch_df.iterrows():
+            batch_no = row['req_batch_no']
+            ts = row['ts']
+            scada_df = self.load_scada_data(batch_no)
+            lng_quantity = self.calc_lng_quantity(scada_df, ts)
+            gas_user_quantity = self.calc_gas_user_quantity(scada_df, ts)
+            merge_df = pd.merge(lng_quantity, gas_user_quantity, on='ts', how='inner')
+            df = pd.concat([df, merge_df], axis=0)
+        df.to_csv('lng_info.csv', index=False, encoding='gbk')
+
+    def load_scada_data(self, batch_no):
+        scada_path = os.path.join(self.work_dir, batch_no, 'scada')
+        scada_name = ""
+        filenames = os.listdir(scada_path)
+        for filename in filenames:
+            if filename.startswith("jzw"):
+                scada_name = filename
+                break
+        scada_df = pd.read_csv(os.path.join(scada_path, scada_name))
+        scada_df['gis_id'] = scada_df['gis_id'].astype(str)
+        return scada_df
+
+    def calc_gas_user_quantity(self, scada_df, ts):
+        gas_df = scada_df[scada_df['gis_id'].isin(self.gas_ids)].copy()
+        user_df = scada_df[scada_df['dno'] == 11].copy()
+        yesterday_ts = ts + timedelta(days=-1)
+        gas_quantity = np.round(gas_df['flow_m3_h'].sum() / 10000, 2)
+        user_quantity = np.round(user_df['flow_m3_h'].sum() / 10000, 2)
+        diff_value = np.round((gas_quantity - user_quantity), 2)
+        df = pd.DataFrame([{"ts": yesterday_ts.strftime("%Y-%m-%d"), "总供气(万方)": gas_quantity,
+                            "总用气(万方)": user_quantity, "差值(万方)": diff_value}])
+        return df
+
+    def calc_lng_quantity(self, scada_df, ts):
+        lng_df = scada_df[scada_df['gis_id'].isin(self.lng_ids)].copy()
+        lng_df = lng_df[['gis_id', 'flow_m3_h']]
+        quantity_df = (lng_df.groupby('gis_id')['flow_m3_h'].sum()).rename('quantity').reset_index()
+        yesterday_ts = ts + timedelta(days=-1)
+        lingang = quantity_df.loc[quantity_df['gis_id'] == '100100022', 'quantity'].values[0]
+        tuanjielu = quantity_df.loc[quantity_df['gis_id'] == '10012167', 'quantity'].values[0]
+        df = pd.DataFrame([{'ts': yesterday_ts.strftime("%Y-%m-%d"), '临港LNG_m3': np.round(lingang, 2),
+                            "团结路_m3": np.round(tuanjielu, 2)}])
+        return df
 
     def calc_company_error_ratio(self):
         """ 计算城燃的误差率 """
@@ -35,7 +84,8 @@ class PeakStatistics:
             real_company_plan = self.load_real_company_plan(next_batch_no)
             company_plan = company_plan[['company_name', 'plan_value_wm3']]
             merge_df = pd.merge(real_company_plan, company_plan, on='company_name')
-            merge_df['ratio'] = (merge_df['plan_value_wm3'] - merge_df['quantity']) / merge_df['quantity'] * 100
+            merge_df['ratio'] = np.round(
+                (merge_df['plan_value_wm3'] - merge_df['quantity']) / merge_df['quantity'] * 100, 2)
             merge_df['ts'] = next_ts.strftime("%Y-%m-%d")
             ratio_df = pd.concat([ratio_df, merge_df], axis=0)
         ratio_df = ratio_df[['ts', 'company_name', 'plan_value_wm3', 'quantity', 'ratio']]
@@ -56,7 +106,8 @@ class PeakStatistics:
             merge_df = pd.merge(real_gas, gas_approv, on='gis_id', how='inner')
             print(merge_df)
             merge_df = merge_df[['gis_id', 'quantity', 'plan_value_wm3', 'stationName']]
-            merge_df['ratio'] = (merge_df['plan_value_wm3'] - merge_df['quantity']) / merge_df['quantity'] * 100
+            merge_df['ratio'] = np.round(
+                (merge_df['plan_value_wm3'] - merge_df['quantity']) / merge_df['quantity'] * 100, 2)
             merge_df['ts'] = next_ts.strftime("%Y-%m-%d")
             ratio_df = pd.concat([ratio_df, merge_df], axis=0)
 
@@ -79,7 +130,7 @@ class PeakStatistics:
         POLI_GAS_INFO = {"gis_id": "100219112", "name": "泊里分输站"}
         sub_df = gas_approval_df[gas_approval_df['gis_id'].isin(POLI_GAS_CHILDREN)]
         poli = pd.DataFrame([{"gis_id": POLI_GAS_INFO['gis_id'], "plan_value_wm3": sub_df['plan_value_wm3'].sum(),
-                "stationName": POLI_GAS_INFO['name'], "unit": sub_df['unit'].unique()[0]}])
+                              "stationName": POLI_GAS_INFO['name'], "unit": sub_df['unit'].unique()[0]}])
         gas_approval_df = pd.concat([gas_approval_df, poli], axis=0, ignore_index=True)
         gas_approval_df = gas_approval_df[gas_approval_df['gis_id'].isin(self.gas_ids)].copy()
         return gas_approval_df
@@ -142,8 +193,6 @@ class PeakStatistics:
         quantity_df = (scada_df.groupby('gis_id')['flow_m3_h'].sum() / 10000).rename('quantity').reset_index()
         quantity_df = quantity_df[quantity_df['gis_id'].isin(self.gas_ids)]
         return quantity_df
-
-
 
 
 if __name__ == "__main__":
